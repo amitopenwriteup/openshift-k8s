@@ -18,18 +18,7 @@ Worker Node
 Hostname Configuration
 Master:
 ```bash
-hostnamectl set-hostname k8s-master
-```
-Worker:
-```bash
-hostnamectl set-hostname k8s-worker1
-```
-Update hosts file on all nodes:
-```bash
-cat >> /etc/hosts <<EOF
-192.168.1.10 k8s-master
-192.168.1.11 k8s-worker1
-EOF
+
 ```
 ---
 Step 1: Disable Swap
