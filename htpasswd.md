@@ -303,7 +303,7 @@ This confirms RBAC is scoped per-user and per-namespace exactly as configured.
 ## 10. Cleanup (optional)
 
 ```bash
-oc login -u kubeadmin -p <kubeadmin-password> https://api.crc.testing:6443
+oc login -u kubeadmin  https://api.crc.testing:6443
 oc delete project dev-workshop
 oc delete secret htpass-secret -n openshift-config
 ```
