@@ -195,10 +195,7 @@ oc apply -f pod-deployment-manager-role.yaml
 Also create a read-only Role for `vieweruser`:
 
 ```bash
-oc create role project-viewer \
-  --verb=get,list,watch \
-  --resource=pods,deployments,services,routes,configmaps \
-  -n dev-workshop
+oc create role project-viewer --verb=get,list,watch --resource=pods,deployments,services,routes,configmaps  -n dev-workshop
 ```
 
 ---
@@ -208,19 +205,13 @@ oc create role project-viewer \
 Bind `devuser` to the `pod-deployment-manager` Role in `dev-workshop`:
 
 ```bash
-oc create rolebinding devuser-pod-deployment-manager \
-  --role=pod-deployment-manager \
-  --user=devuser \
-  -n dev-workshop
+oc create rolebinding devuser-pod-deployment-manager  --role=pod-deployment-manager  --user=devuser  -n dev-workshop
 ```
 
 Bind `vieweruser` to the read-only Role:
 
 ```bash
-oc create rolebinding vieweruser-project-viewer \
-  --role=project-viewer \
-  --user=vieweruser \
-  -n dev-workshop
+oc create rolebinding vieweruser-project-viewer  --role=project-viewer  --user=vieweruser  -n dev-workshop
 ```
 
 Equivalent YAML version (for `devuser`):
