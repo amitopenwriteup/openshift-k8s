@@ -86,18 +86,13 @@ You should see one bcrypt-hashed line per user.
 The secret must live in the `openshift-config` namespace and use the key name `htpasswd`.
 
 ```bash
-oc create secret generic htpass-secret \
-  --from-file=htpasswd=users.htpasswd \
-  -n openshift-config
+oc create secret generic htpass-secret  --from-file=htpasswd=users.htpasswd  -n openshift-config
 ```
 
 If the secret already exists and you're adding users later, update it instead:
 
 ```bash
-oc create secret generic htpass-secret \
-  --from-file=htpasswd=users.htpasswd \
-  -n openshift-config \
-  --dry-run=client -o yaml | oc replace -f -
+oc create secret generic htpass-secret --from-file=htpasswd=users.htpasswd -n openshift-config --dry-run=client -o yaml | oc replace -f -
 ```
 
 ---
@@ -133,15 +128,7 @@ spec:
           name: htpass-secret
 ```
 
-Save and exit. The `authentication-operator` will roll out the change — give it 1–3 minutes:
 
-```bash
-oc get clusteroperator authentication -w
-```
-
-Wait until `AVAILABLE` is `True` and `PROGRESSING` is `False`, then `Ctrl+C`.
-
----
 
 ## 5. Verify Login as the New Users
 
@@ -155,7 +142,7 @@ At this point `devuser` exists as a cluster user but has **no permissions** beyo
 Log back in as `kubeadmin` for the next steps:
 
 ```bash
-oc login -u kubeadmin -p <kubeadmin-password> https://api.crc.testing:6443
+oc login -u kubeadmin https://api.crc.testing:6443
 ```
 
 ---
@@ -175,10 +162,7 @@ This example Role grants typical "developer" permissions on Pods, Deployments, S
 **Option A — imperative command:**
 
 ```bash
-oc create role pod-deployment-manager \
-  --verb=get,list,watch,create,update,patch,delete \
-  --resource=pods,deployments,services,routes,configmaps \
-  -n dev-workshop
+oc create role pod-deployment-manager   --verb=get,list,watch,create,update,patch,delete  --resource=pods,deployments,services,routes,configmaps  -n dev-workshop
 ```
 
 **Option B — YAML manifest (recommended for repeatability):**
