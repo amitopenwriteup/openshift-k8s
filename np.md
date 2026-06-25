@@ -17,6 +17,7 @@
 10. [Testing Methodology](#testing-methodology)
 11. [Cleanup](#cleanup)
 12. [Reference: Policy Cheat Sheet](#reference-policy-cheat-sheet)
+13. [Troubleshooting Notes](#troubleshooting-notes)
 
 ---
 
@@ -43,7 +44,7 @@ oc login -u kubeadmin -p $(crc console --credentials | grep kubeadmin | awk '{pr
 
 In this workshop you will:
 
-- Deploy **two applications** (`app-frontend` and `app-backend`) in dedicated namespaces.
+- Deploy **two applications** (`app-frontend` and `app-backend`) in dedicated namespaces, both running the `nginxinc/nginx-unprivileged` image so they need no runtime package installation and no root privileges.
 - Configure **Security Context Constraints (SCC)** with specific `runAsUser` UIDs so pods run with controlled identities.
 - Write and apply **NetworkPolicy** objects that control:
   - **Ingress** — who is allowed to talk *to* a pod.
@@ -57,6 +58,7 @@ In this workshop you will:
 │  ┌──────────────────┐   Ingress   ┌─────────────────────┐  │
 │  │  app-frontend    │ ──────────► │   app-backend       │  │
 │  │  UID: 1001       │             │   UID: 1002         │  │
+│  │  nginx-unprivileged│           │  nginx-unprivileged  │  │
 │  └──────────────────┘             └─────────────────────┘  │
 │         │                                  │               │
 │         │ Egress (DNS only)                │ Egress (blocked) │
@@ -64,6 +66,8 @@ In this workshop you will:
 │      Internet / DNS                   [Denied]             │
 └────────────────────────────────────────────────────────────┘
 ```
+
+> **Why `nginxinc/nginx-unprivileged`?** It's purpose-built to run as a non-root, arbitrary UID and listen on port 8080 out of the box — no `microdnf install` step, no `nc`/`curl` bootstrapping at container start. This removes an entire class of crash-loop failures caused by package managers trying to write to a read-only root filesystem (see [Troubleshooting Notes](#troubleshooting-notes)).
 
 ---
 
@@ -76,8 +80,6 @@ crc start
 
 oc new-project workshop-frontend
 oc new-project workshop-backend
-
-oc get namespaces | grep workshop
 ```
 
 ### 2. Label the Namespaces
@@ -104,6 +106,18 @@ When combined with NetworkPolicy:
 - A known UID makes it easier to audit which process generated network traffic.
 - `anyuid` SCC is avoided in production; we pin UIDs instead.
 - CRC ships with `restricted` SCC by default — we must grant access explicitly.
+- `nginxinc/nginx-unprivileged` is designed for exactly this pattern: it ships with group-writable permissions on `/var/cache/nginx`, `/etc/nginx`, and friends so it tolerates an arbitrary `runAsUser` as long as `fsGroup` is set correctly — which our SCC and deployments already do.
+
+> **Important — `MustRunAs` vs `MustRunAsRange`:**
+> This workshop's SCC must cover **two different UIDs** — 1001 for the frontend pod and 1002 for the backend pod. The `runAsUser` field has two distinct strategy types and they are *not* interchangeable:
+> - `type: MustRunAs` with a single `uid:` value pins the SCC to **exactly that one UID**. Any pod requesting a different `runAsUser` will be rejected at admission.
+> - `type: MustRunAsRange` with `uidRangeMin` / `uidRangeMax` allows **any UID within the range**.
+>
+> Since this SCC needs to admit both 1001 and 1002, it must use `MustRunAsRange`. Using `MustRunAs` with `uid: 1001` will cause the backend deployment to fail SCC admission with an error like:
+> ```
+> provider workshop-scc: .containers[0].runAsUser: Invalid value: 1002: must be: 1001
+> ```
+> and then cascade through every other SCC on the cluster looking for one that allows UID 1002, eventually failing with a long list of `Forbidden` providers.
 
 ### Create a Custom SCC (`workshop-scc`)
 
@@ -120,8 +134,9 @@ defaultAddCapabilities: []
 requiredDropCapabilities:
   - ALL
 runAsUser:
-  type: MustRunAs
-  uid: 1001
+  type: MustRunAsRange
+  uidRangeMin: 1001
+  uidRangeMax: 1002
 fsGroup:
   type: MustRunAs
   ranges:
@@ -151,7 +166,25 @@ oc describe scc workshop-scc
 
 ## Deploy the Two Test Applications
 
+Both apps run `docker.io/nginxinc/nginx-unprivileged:stable`, which listens on port **8080** by default and requires no install step. Each pod still gets:
+
+- A pinned `runAsUser` (1001 frontend / 1002 backend) via `workshop-scc`.
+- `readOnlyRootFilesystem: true` — nginx only needs two small writable scratch paths (`/var/cache/nginx` for its temp/cache dirs and `/tmp` for the pid file), both supplied via `emptyDir`.
+- A `ConfigMap`-backed `index.html` so each app returns an identifiable response body, useful for verifying which pod actually answered a request.
+
 ### App 1 — Frontend (UID 1001)
+
+```yaml
+# frontend-configmap.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: app-frontend-html
+  namespace: workshop-frontend
+data:
+  index.html: |
+    Hello Frontend
+```
 
 ```yaml
 # frontend-deployment.yaml
@@ -180,11 +213,7 @@ spec:
         fsGroup: 1001
       containers:
         - name: frontend
-          image: registry.access.redhat.com/ubi9/ubi-minimal:latest
-          command: ["/bin/sh", "-c"]
-          args:
-            - |
-              microdnf install -y curl ncat && while true; do echo "frontend running"; sleep 30; done
+          image: docker.io/nginxinc/nginx-unprivileged:stable
           ports:
             - containerPort: 8080
           securityContext:
@@ -192,6 +221,23 @@ spec:
             readOnlyRootFilesystem: true
             capabilities:
               drop: ["ALL"]
+          volumeMounts:
+            - name: nginx-cache
+              mountPath: /var/cache/nginx
+            - name: nginx-tmp
+              mountPath: /tmp
+            - name: html
+              mountPath: /usr/share/nginx/html/index.html
+              subPath: index.html
+              readOnly: true
+      volumes:
+        - name: nginx-cache
+          emptyDir: {}
+        - name: nginx-tmp
+          emptyDir: {}
+        - name: html
+          configMap:
+            name: app-frontend-html
 ---
 apiVersion: v1
 kind: Service
@@ -207,6 +253,18 @@ spec:
 ```
 
 ### App 2 — Backend (UID 1002)
+
+```yaml
+# backend-configmap.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: app-backend-html
+  namespace: workshop-backend
+data:
+  index.html: |
+    Hello Backend
+```
 
 ```yaml
 # backend-deployment.yaml
@@ -235,11 +293,7 @@ spec:
         fsGroup: 1002
       containers:
         - name: backend
-          image: registry.access.redhat.com/ubi9/ubi-minimal:latest
-          command: ["/bin/sh", "-c"]
-          args:
-            - |
-              microdnf install -y ncat curl && while true; do echo "HTTP/1.1 200 OK\r\nContent-Length: 13\r\n\r\nHello Backend" | nc -l -p 8080 -q 1; done
+          image: docker.io/nginxinc/nginx-unprivileged:stable
           ports:
             - containerPort: 8080
           securityContext:
@@ -247,6 +301,23 @@ spec:
             readOnlyRootFilesystem: true
             capabilities:
               drop: ["ALL"]
+          volumeMounts:
+            - name: nginx-cache
+              mountPath: /var/cache/nginx
+            - name: nginx-tmp
+              mountPath: /tmp
+            - name: html
+              mountPath: /usr/share/nginx/html/index.html
+              subPath: index.html
+              readOnly: true
+      volumes:
+        - name: nginx-cache
+          emptyDir: {}
+        - name: nginx-tmp
+          emptyDir: {}
+        - name: html
+          configMap:
+            name: app-backend-html
 ---
 apiVersion: v1
 kind: Service
@@ -262,7 +333,9 @@ spec:
 ```
 
 ```bash
+oc apply -f frontend-configmap.yaml
 oc apply -f frontend-deployment.yaml
+oc apply -f backend-configmap.yaml
 oc apply -f backend-deployment.yaml
 
 oc rollout status deployment/app-frontend -n workshop-frontend
@@ -271,7 +344,17 @@ oc rollout status deployment/app-backend -n workshop-backend
 # Verify UIDs (must show 1001 and 1002 respectively)
 oc exec -n workshop-frontend deploy/app-frontend -- id
 oc exec -n workshop-backend deploy/app-backend -- id
+
+# Verify each app answers with its identifying body
+oc exec -n workshop-frontend deploy/app-frontend -- curl -s localhost:8080
+oc exec -n workshop-backend deploy/app-backend -- curl -s localhost:8080
 ```
+
+> If a pod is stuck in `0/1` with `ReplicaFailure` and `oc events -n <namespace>` shows `unable to validate against any security context constraint`, re-apply the corrected `workshop-scc.yaml` above (with `MustRunAsRange`), then run:
+> ```bash
+> oc rollout restart deployment/app-backend -n workshop-backend
+> oc rollout status deployment/app-backend -n workshop-backend
+> ```
 
 ---
 
@@ -403,7 +486,7 @@ oc get networkpolicy -n workshop-backend
 FRONTEND_POD=$(oc get pod -n workshop-frontend -l app=app-frontend -o jsonpath='{.items[0].metadata.name}')
 BACKEND_SVC_IP=$(oc get svc app-backend-svc -n workshop-backend -o jsonpath='{.spec.clusterIP}')
 
-# Should succeed
+# Should succeed — and the body should read "Hello Backend"
 oc exec -n workshop-frontend $FRONTEND_POD -- curl -v --connect-timeout 5 http://$BACKEND_SVC_IP:8080
 
 # Port 9999 should still fail
@@ -420,6 +503,8 @@ oc exec -n workshop-rogue rogue -- curl -v --connect-timeout 5 http://$BACKEND_S
 
 # Expected: Connection timed out — policy blocks it
 ```
+
+> The rogue pod intentionally still uses `ubi9-minimal` with a plain `sleep` — it's just a throwaway test client, so there's no install step and no read-only-filesystem concern.
 
 ---
 
@@ -547,8 +632,8 @@ BACKEND_POD=$(oc get pod -n workshop-backend -l app=app-backend -o jsonpath='{.i
 BACKEND_IP=$(oc get svc app-backend-svc -n workshop-backend -o jsonpath='{.spec.clusterIP}')
 FRONTEND_IP=$(oc get svc app-frontend-svc -n workshop-frontend -o jsonpath='{.spec.clusterIP}')
 
-# [1] Frontend → Backend:8080 — SHOULD SUCCEED
-oc exec -n workshop-frontend $FRONTEND_POD -- curl -s -o /dev/null -w "%{http_code}" --connect-timeout 5 http://$BACKEND_IP:8080
+# [1] Frontend → Backend:8080 — SHOULD SUCCEED, body "Hello Backend"
+oc exec -n workshop-frontend $FRONTEND_POD -- curl -s http://$BACKEND_IP:8080
 
 # [2] Frontend → Backend:9999 — SHOULD FAIL (port not allowed)
 oc exec -n workshop-frontend $FRONTEND_POD -- curl -s -o /dev/null -w "%{http_code}" --connect-timeout 5 http://$BACKEND_IP:9999
@@ -595,7 +680,9 @@ oc delete networkpolicy --all -n workshop-frontend
 oc delete networkpolicy --all -n workshop-backend
 
 oc delete -f frontend-deployment.yaml
+oc delete -f frontend-configmap.yaml
 oc delete -f backend-deployment.yaml
+oc delete -f backend-configmap.yaml
 
 oc adm policy remove-scc-from-user workshop-scc system:serviceaccount:workshop-frontend:default
 oc adm policy remove-scc-from-user workshop-scc system:serviceaccount:workshop-backend:default
@@ -607,64 +694,4 @@ oc delete project workshop-frontend workshop-backend workshop-rogue
 
 ---
 
-## Reference: Policy Cheat Sheet
-
-### Ingress Rules
-
-| Goal | Key Field |
-|------|-----------|
-| Allow from specific namespace | `from[].namespaceSelector.matchLabels` |
-| Allow from specific pod | `from[].podSelector.matchLabels` |
-| Allow from specific pod IN specific namespace | Both selectors on same `from` entry |
-| Allow from any pod in cluster | `from[].namespaceSelector: {}` |
-| Deny all inbound | `policyTypes: [Ingress]` with no `ingress` block |
-
-### Egress Rules
-
-| Goal | Key Field |
-|------|-----------|
-| Allow to specific namespace | `to[].namespaceSelector.matchLabels` |
-| Allow to specific pod | `to[].podSelector.matchLabels` |
-| Allow to external CIDR | `to[].ipBlock.cidr` |
-| Exclude IPs from CIDR | `to[].ipBlock.except[]` |
-| Allow DNS only | Port 53 UDP + TCP, no `to` selector |
-| Deny all outbound | `policyTypes: [Egress]` with no `egress` block |
-
-### Common Port References
-
-| Service | Protocol | Port |
-|---------|----------|------|
-| DNS | UDP/TCP | 53 |
-| HTTP | TCP | 80 |
-| HTTPS | TCP | 443 |
-| App (workshop) | TCP | 8080 |
-| OpenShift API | TCP | 6443 |
-
-### SCC Quick Reference
-
-| SCC | UID Behaviour | Use Case |
-|-----|--------------|----------|
-| `restricted` | UID allocated from namespace range | Default, most pods |
-| `restricted-v2` | Same as restricted, stricter caps | OCP 4.11+ default |
-| `anyuid` | Any UID including root | Legacy apps — avoid |
-| `workshop-scc` | MustRunAs specific UID | This workshop |
-
----
-
-## Summary of Policies Applied
-
-```
-workshop-backend namespace
-├── deny-all-ingress              (Lab 1a) — Blocks all inbound
-├── deny-all-egress               (Lab 1b) — Blocks all outbound
-├── allow-ingress-from-frontend   (Lab 2a) — Opens port 8080 from frontend only
-├── allow-egress-dns              (Lab 3a) — Permits DNS resolution
-└── allow-egress-external-api     (Lab 3c) — Permits specific external CIDR
-
-workshop-frontend namespace
-└── allow-egress-to-backend       (Lab 3b) — Permits outbound to backend:8080 + DNS
-```
-
----
-
-*Workshop version 1.1 — OpenShift CRC · OVN-Kubernetes CNI · NetworkPolicy v1*
+\
