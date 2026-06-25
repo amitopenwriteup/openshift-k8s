@@ -49,7 +49,7 @@ External User / Browser
 
 ```bash
 eval $(crc oc-env)
-oc login -u kubeadmin -p <kubeadmin-password> https://api.crc.testing:6443
+oc login -u kubeadmin https://api.crc.testing:6443
 oc whoami
 ```
 
