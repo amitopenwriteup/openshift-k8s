@@ -1,6 +1,8 @@
 # OpenShift Routes - HTTP Only (Two VIPs) — Fixed Lab Guide
 
-> **Fix Applied:** MetalLB controller fails to start when the `memberlist` secret and webhook TLS secret are missing. Secrets must be created **before** installing MetalLB so pods can start cleanly on first boot.
+> **Fixes Applied:**
+> 1. The `memberlist` secret and webhook TLS secret must be created **before** installing MetalLB so pods can start cleanly on first boot.
+> 2. On OpenShift, the `controller` and `speaker` service accounts in `metallb-system` have **no SCC granted by default**, so the ReplicaSet/DaemonSet cannot create pods at all (`FailedCreate`, `0/1 replicas`). SCCs must be granted to these service accounts **immediately after install**, before any pods can be scheduled.
 
 ---
 
@@ -112,7 +114,7 @@ webhook-server-cert   kubernetes.io/tls   2      1m
 
 ## Step 3 — Install MetalLB
 
-Now that secrets are in place, install MetalLB. The controller and speaker pods will find the secrets immediately on startup:
+Now that secrets are in place, install MetalLB:
 
 ```bash
 oc apply -f https://raw.githubusercontent.com/metallb/metallb/v0.13.12/config/manifests/metallb-native.yaml
@@ -124,13 +126,51 @@ Wait for CRDs to be established:
 oc wait --namespace metallb-system --for=condition=established crd/ipaddresspools.metallb.io --timeout=60s
 ```
 
-Wait for all pods to be ready:
+> **Do not wait on pod readiness yet.** On OpenShift, the `controller` and `speaker` pods cannot be created at all until the SCC fix in Step 3a is applied — they will sit at `0/1 replicas` with `FailedCreate` events. Apply Step 3a immediately, then proceed to the wait/verify commands.
+
+---
+
+## Step 3a — Grant SCCs to MetalLB Service Accounts (Required on OpenShift)
+
+The upstream `metallb-native.yaml` manifest is written for vanilla Kubernetes and assumes the cluster will permit `hostNetwork`, host ports, and the `NET_RAW` capability by default. OpenShift's SCC admission model requires an **explicit binding** between a service account and an SCC before any pod using these privileged features can be created. Without this, the ReplicaSet (`controller`) and DaemonSet (`speaker`) will fail to create pods entirely — not crash, **never even get created**.
+
+Grant the `privileged` SCC to both service accounts:
+
+```bash
+oc adm policy add-scc-to-user privileged -z controller -n metallb-system
+oc adm policy add-scc-to-user privileged -z speaker -n metallb-system
+```
+
+Verify the bindings:
+
+```bash
+oc get scc privileged -o yaml | grep -A5 users
+```
+
+You should see both service accounts listed:
+
+```
+users:
+- system:serviceaccount:metallb-system:controller
+- system:serviceaccount:metallb-system:speaker
+```
+
+> **Note:** `speaker` genuinely requires `privileged` (or `hostnetwork`) because it uses `hostNetwork: true` and host ports `7472`/`7946`. `controller` may work with a less permissive SCC in hardened environments, but `privileged` is used here to unblock the lab quickly; tighten later if required by policy.
+
+Once the SCC is bound, the existing ReplicaSet/DaemonSet controllers will automatically retry pod creation within a few seconds — **no pod deletion is needed** if pods were never created. If pods exist in a bad state, force a refresh:
+
+```bash
+oc delete pod -n metallb-system -l component=controller
+oc delete pod -n metallb-system -l component=speaker
+```
+
+---
+
+## Step 3b — Wait for and Verify Pods
 
 ```bash
 oc wait --namespace metallb-system --for=condition=ready pod --selector=app=metallb --timeout=120s
 ```
-
-Verify all pods are running:
 
 ```bash
 oc get pods -n metallb-system
@@ -146,7 +186,9 @@ speaker-xxxx                          1/1     Running   0          2m
 speaker-yyyy                          1/1     Running   0          2m
 ```
 
-> **Troubleshooting:** If the controller shows `CrashLoopBackOff`, secrets were likely applied after install. Delete the controller pod to force a restart: `oc delete pod -n metallb-system -l component=controller`
+> **Troubleshooting — CrashLoopBackOff:** If the controller pod is created but shows `CrashLoopBackOff`, the secrets were likely applied after install. Delete the controller pod to force a restart: `oc delete pod -n metallb-system -l component=controller`
+>
+> **Troubleshooting — 0/1 replicas, FailedCreate, never reaches CrashLoopBackOff:** This is the SCC issue, not the secrets issue. Confirm with `oc describe rs -n metallb-system` or `oc get events -n metallb-system --sort-by=.lastTimestamp`. If you see `unable to validate against any security context constraint` with every provider ending in `Forbidden: not usable by user or serviceaccount`, return to Step 3a.
 
 ---
 
@@ -368,6 +410,7 @@ oc apply -f route-hr.yaml
 
 ```bash
 oc get secrets -n metallb-system
+oc get scc privileged -o yaml | grep -A5 users
 oc get ipaddresspool -n metallb-system
 oc get svc -n workshop
 oc get routes -n workshop
@@ -414,7 +457,36 @@ curl http://hr.ow.com
 
 ## Troubleshooting
 
+### Pods stuck at 0/1 replicas, FailedCreate events, never reach Pending/CrashLoopBackOff (SCC issue)
+
+This means the ReplicaSet (`controller`) or DaemonSet (`speaker`) was rejected by SCC admission before a Pod object was ever created — this is **not** a secrets problem.
+
+```bash
+oc get rs -n metallb-system
+oc describe rs <controller-replicaset-name> -n metallb-system
+oc get events -n metallb-system --sort-by=.lastTimestamp | tail -20
+```
+
+Look for an event like:
+
+```
+Error creating: pods "controller-xxxx" is forbidden: unable to validate against any
+security context constraint: [provider "anyuid": Forbidden: not usable by user or
+serviceaccount, ... provider "privileged": Forbidden: not usable by user or serviceaccount]
+```
+
+If every provider in the list ends in `Forbidden: not usable by user or serviceaccount`, the service account has no SCC bound at all. Fix:
+
+```bash
+oc adm policy add-scc-to-user privileged -z controller -n metallb-system
+oc adm policy add-scc-to-user privileged -z speaker -n metallb-system
+```
+
+No pod deletion is required — pending ReplicaSet/DaemonSet controllers retry automatically once the SCC is bound. See **Step 3a** for full details.
+
 ### Controller CrashLoopBackOff (secrets created after install)
+
+This is a different failure mode: the pod *was* created and is starting, but crashing. This happens when secrets (`memberlist`, `webhook-server-cert`) were applied after MetalLB install.
 
 Force a pod restart to pick up the secrets:
 
@@ -425,10 +497,11 @@ oc logs -n metallb-system deployment/controller
 
 ### Webhook service has no endpoints
 
-The `webhook-service` showing `<none>` means the controller pod is not running. Confirm secrets exist and restart the controller:
+The `webhook-service` showing `<none>` means the controller pod is not running. Confirm secrets and SCC bindings, then check pod status:
 
 ```bash
 oc get secrets -n metallb-system
+oc get scc privileged -o yaml | grep -A5 users
 oc get endpoints -n metallb-system
 oc get pods -n metallb-system
 ```
