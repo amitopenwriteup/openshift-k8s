@@ -335,7 +335,7 @@ spec:
     spec:
       containers:
       - name: nginx
-        image: nginx:latest
+        image: nginxinc/nginx-unprivileged
         ports:
         - containerPort: 80
         volumeMounts:
