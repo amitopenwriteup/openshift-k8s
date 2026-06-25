@@ -162,8 +162,7 @@ CLUSTER_IP=$(oc get svc sample-app-clusterip -n networking-workshop -o jsonpath=
 echo "ClusterIP: $CLUSTER_IP"
 
 # Curl from inside the cluster
-oc run curl-test --image=curlimages/curl:latest --rm -it --restart=Never \
-  -n networking-workshop -- curl -s http://$CLUSTER_IP/
+oc run curl-test --image=curlimages/curl:latest --rm -it --restart=Never  -n networking-workshop -- curl -s http://$CLUSTER_IP/
 ```
 
 You should see the NGINX welcome response. The ClusterIP also resolves by DNS inside the cluster:
