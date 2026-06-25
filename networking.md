@@ -82,7 +82,7 @@ spec:
     spec:
       containers:
         - name: nginx
-          image: registry.access.redhat.com/ubi9/nginx-120
+          image: nginxinc/nginx-unprivileged
           ports:
             - containerPort: 8080
           command: ["/bin/bash", "-c"]
