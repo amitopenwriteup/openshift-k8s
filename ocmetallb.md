@@ -206,6 +206,8 @@ spec:
   addresses:
   - 192.168.130.100/32
   - 192.168.130.101/32
+  - 192.168.126.100/32
+  - 192.168.126.101/32
 ```
 
 ```bash
@@ -232,8 +234,8 @@ oc apply -f l2advertisement.yaml
 VIP assignment:
 
 ```
-VIP 1 = 192.168.130.100  -->  erp.ow.com
-VIP 2 = 192.168.130.101  -->  hr.ow.com
+VIP 1 = 192.168.130.100 / 192.168.126.100  -->  erp.ow.com
+VIP 2 = 192.168.130.101 / 192.168.126.101  -->  hr.ow.com
 ```
 
 ---
@@ -448,9 +450,14 @@ echo "192.168.130.101 hr.ow.com" | sudo tee -a /etc/hosts
 
 ## Step 11 — Test
 
+Since MetalLB L2 VIPs are reachable only from within the cluster network, run tests using a temporary pod:
+
 ```bash
-curl http://erp.ow.com
-curl http://hr.ow.com
+oc run curltest --image=registry.access.redhat.com/ubi9/ubi --restart=Never --rm -it -n workshop -- curl -s http://192.168.126.100
+```
+
+```bash
+oc run curltest --image=registry.access.redhat.com/ubi9/ubi --restart=Never --rm -it -n workshop -- curl -s http://192.168.126.101
 ```
 
 ---
